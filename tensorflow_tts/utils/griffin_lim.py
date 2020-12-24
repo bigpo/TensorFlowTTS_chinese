@@ -40,7 +40,7 @@ def griffin_lim_lb(
     scaler = StandardScaler()
     scaler.mean_, scaler.scale_ = np.load(stats_path)
 
-    mel_spec = np.power(10.0, scaler.inverse_transform(mel_spec)).T
+    mel_spec = np.power(10.0, scaler.inverse_transform(mel_spec)).T #对应取log运算
     mel_basis = librosa.filters.mel(
         dataset_config["sampling_rate"],
         n_fft=dataset_config["fft_size"],

@@ -25,13 +25,14 @@ import numpy as np
 import pyworld as pw
 
 from functools import partial
-from multiprocessing import Pool
+# from multiprocessing import Pool
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
 from tqdm import tqdm
 
 from tensorflow_tts.processor import LJSpeechProcessor
 from tensorflow_tts.processor import BakerProcessor
+from tensorflow_tts.processor import ChineseProcessor
 from tensorflow_tts.processor import KSSProcessor
 from tensorflow_tts.processor import LibriTTSProcessor
 
@@ -60,7 +61,7 @@ def parse_and_config():
     )
     parser.add_argument(
         "--outdir",
-        default="dump_baker0",
+        default="dump_baker",
         type=str,
         # required=True,
         help="Output directory where features will be saved.",
@@ -69,7 +70,7 @@ def parse_and_config():
         "--dataset",
         type=str,
         default="baker",
-        choices=["ljspeech", "kss", "libritts", "baker"],
+        choices=["ljspeech", "kss", "libritts", "baker", "zh_cn"],
         help="Dataset to preprocess.",
     )
     parser.add_argument(
@@ -349,6 +350,7 @@ def preprocess():
         "kss": KSSProcessor,
         "libritts": LibriTTSProcessor,
         "baker": BakerProcessor,
+        "zh_cn": ChineseProcessor
     }
 
     dataset_symbol = {
@@ -356,6 +358,7 @@ def preprocess():
         "kss": KSS_SYMBOLS,
         "libritts": LIBRITTS_SYMBOLS,
         "baker": BAKER_SYMBOLS,
+        "zh_cn": BAKER_SYMBOLS
     }
 
     dataset_cleaner = {
@@ -363,6 +366,7 @@ def preprocess():
         "kss": "korean_cleaners",
         "libritts": None,
         "baker": None,
+        "zh_cn": None
     }
 
     logging.info(f"Selected '{config['dataset']}' processor.")
@@ -423,22 +427,25 @@ def preprocess():
     train_iterator_data = iterator_data(train_split)
     valid_iterator_data = iterator_data(valid_split)
 
-    p = Pool(config["n_cpus"])
-
-    # preprocess train files and get statistics for normalizing
-    partial_fn = partial(gen_audio_features, config=config)
-    train_map = p.imap_unordered(
-        partial_fn,
-        tqdm(train_iterator_data, total=len(train_split), desc="[Preprocessing train]"),
-        chunksize=10,
-    )
     # init scaler for multiple features
     scaler_mel = StandardScaler(copy=False)
     scaler_energy = StandardScaler(copy=False)
     scaler_f0 = StandardScaler(copy=False)
 
+    # p = Pool(config["n_cpus"])
+
+    # # preprocess train files and get statistics for normalizing
+    # partial_fn = partial(gen_audio_features, config=config)
+    # train_map = p.imap_unordered(
+    #     partial_fn,
+    #     tqdm(train_iterator_data, total=len(train_split), desc="[Preprocessing train]"),
+    #     chunksize=10,
+    # )
+
     id_to_remove = []
-    for result, mel, energy, f0, features in train_map:
+    for item in train_iterator_data:
+        result, mel, energy, f0, features = gen_audio_features(item, config)
+
         if not result:
             id_to_remove.append(features["utt_id"])
             continue
@@ -454,7 +461,7 @@ def preprocess():
         if len(energy[energy != 0]) == 0 or len(f0[f0 != 0]) == 0:
             id_to_remove.append(features["utt_id"])
             continue
-        scaler_mel.partial_fit(mel)
+        scaler_mel.partial_fit(mel) #一个一个的传递，最后获取总的！
         scaler_energy.partial_fit(energy[energy != 0].reshape(-1, 1))
         scaler_f0.partial_fit(f0[f0 != 0].reshape(-1, 1))
 

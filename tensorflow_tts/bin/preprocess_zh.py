@@ -14,6 +14,9 @@
 # limitations under the License.
 """Perform preprocessing, with raw feature extraction and normalization of train/valid split."""
 
+import warnings
+warnings.filterwarnings('ignore')
+
 import argparse
 import glob
 import logging
@@ -32,6 +35,7 @@ from tqdm import tqdm
 
 from tensorflow_tts.processor import LJSpeechProcessor
 from tensorflow_tts.processor import BakerProcessor
+from tensorflow_tts.processor import ChineseProcessor
 from tensorflow_tts.processor import KSSProcessor
 from tensorflow_tts.processor import LibriTTSProcessor
 
@@ -53,14 +57,14 @@ def parse_and_config():
     )
     parser.add_argument(
         "--rootdir",
-        default="baker",
+        default="/data/songpo/voice/zhmagicdata_all",
         type=str,
         # required=True,
         help="Directory containing the dataset files.",
     )
     parser.add_argument(
         "--outdir",
-        default="dump_baker0",
+        default="dump_debug",
         type=str,
         # required=True,
         help="Output directory where features will be saved.",
@@ -68,8 +72,8 @@ def parse_and_config():
     parser.add_argument(
         "--dataset",
         type=str,
-        default="baker",
-        choices=["ljspeech", "kss", "libritts", "baker"],
+        default="zh_cn",
+        choices=["ljspeech", "kss", "libritts", "baker", "zh_cn"],
         help="Dataset to preprocess.",
     )
     parser.add_argument(
@@ -82,7 +86,7 @@ def parse_and_config():
     parser.add_argument(
         "--n_cpus",
         type=int,
-        default=1,
+        default=8,
         required=False,
         help="Number of CPUs to use in parallel.",
     )
@@ -185,10 +189,14 @@ def gen_audio_features(item, config):
         f0 (ndarray): fundamental frequency.
         item (Dict): dictionary containing the updated attributes.
     """
+    if item is None:
+        return False, False, False, False, False, False
+
     # get info from sample.
     audio = item["audio"]
     utt_id = item["utt_id"]
     rate = item["rate"]
+    speaker_name = item["speaker_name"]
 
     # check audio properties
     assert len(audio.shape) == 1, f"{utt_id} seems to be multi-channel signal."
@@ -285,15 +293,16 @@ def gen_audio_features(item, config):
     # apply global gain
     if config["global_gain_scale"] > 0.0:
         audio *= config["global_gain_scale"]
-    if np.abs(audio).max() >= 1.0:
-        logging.warn(
-            f"{utt_id} causes clipping. It is better to reconsider global gain scale value."
-        )
+    
+    peak = np.abs(audio).max()
+    if peak > 1.0:
+        audio /= peak
+
     item["audio"] = audio
     item["mel"] = mel
     item["f0"] = f0
     item["energy"] = energy
-    return True, mel, energy, f0, item
+    return True, mel, energy, f0, item, speaker_name
 
 
 def save_statistics_to_file(scaler_list, config):
@@ -311,7 +320,7 @@ def save_statistics_to_file(scaler_list, config):
         )
 
 
-def save_features_to_file(features, subdir, config):
+def save_features_to_file(features, subdir, speaker_name, config):
     """Save transformed dataset features in disk.
     Args:
         features (Dict): dictionary containing the attributes to save.
@@ -329,10 +338,11 @@ def save_features_to_file(features, subdir, config):
             (features["energy"], "raw-energies", "raw-energy", np.float32),
         ]
         for item, name_dir, name_file, fmt in save_list:
-            np.save(
-                os.path.join(
-                    config["outdir"], subdir, name_dir, f"{utt_id}-{name_file}.npy"
-                ),
+            save_path = os.path.join(
+                    config["outdir"], subdir, name_dir, speaker_name, f"{utt_id}-{name_file}.npy"
+                )
+            os.makedirs(os.path.dirname(save_path), exist_ok=True)
+            np.save(save_path,
                 item.astype(fmt),
                 allow_pickle=False,
             )
@@ -349,6 +359,7 @@ def preprocess():
         "kss": KSSProcessor,
         "libritts": LibriTTSProcessor,
         "baker": BakerProcessor,
+        "zh_cn": ChineseProcessor
     }
 
     dataset_symbol = {
@@ -356,6 +367,7 @@ def preprocess():
         "kss": KSS_SYMBOLS,
         "libritts": LIBRITTS_SYMBOLS,
         "baker": BAKER_SYMBOLS,
+        "zh_cn": BAKER_SYMBOLS
     }
 
     dataset_cleaner = {
@@ -363,6 +375,7 @@ def preprocess():
         "kss": "korean_cleaners",
         "libritts": None,
         "baker": None,
+        "zh_cn": None
     }
 
     logging.info(f"Selected '{config['dataset']}' processor.")
@@ -408,7 +421,7 @@ def preprocess():
     logging.info(f"Validation items: {len(valid_split)}")
 
     get_utt_id = lambda x: os.path.split(x[1])[-1].split(".")[0]
-    train_utt_ids = [get_utt_id(x) for x in train_split]
+    train_utt_ids = [get_utt_id(x) for x in train_split] #TODO 这个作用是什么？
     valid_utt_ids = [get_utt_id(x) for x in valid_split]
 
     # save train and valid utt_ids to track later
@@ -423,6 +436,11 @@ def preprocess():
     train_iterator_data = iterator_data(train_split)
     valid_iterator_data = iterator_data(valid_split)
 
+    # init scaler for multiple features
+    scaler_mel = StandardScaler(copy=False)
+    scaler_energy = StandardScaler(copy=False)
+    scaler_f0 = StandardScaler(copy=False)
+
     p = Pool(config["n_cpus"])
 
     # preprocess train files and get statistics for normalizing
@@ -432,17 +450,13 @@ def preprocess():
         tqdm(train_iterator_data, total=len(train_split), desc="[Preprocessing train]"),
         chunksize=10,
     )
-    # init scaler for multiple features
-    scaler_mel = StandardScaler(copy=False)
-    scaler_energy = StandardScaler(copy=False)
-    scaler_f0 = StandardScaler(copy=False)
 
     id_to_remove = []
-    for result, mel, energy, f0, features in train_map:
+    for result, mel, energy, f0, features, speaker_name in train_map:
         if not result:
             id_to_remove.append(features["utt_id"])
             continue
-        save_features_to_file(features, "train", config)
+        save_features_to_file(features, "train", speaker_name, config)
         # remove outliers
         energy = remove_outlier(energy)
         f0 = remove_outlier(f0)
@@ -454,7 +468,7 @@ def preprocess():
         if len(energy[energy != 0]) == 0 or len(f0[f0 != 0]) == 0:
             id_to_remove.append(features["utt_id"])
             continue
-        scaler_mel.partial_fit(mel)
+        scaler_mel.partial_fit(mel) #一个一个的传递，最后获取总的！
         scaler_energy.partial_fit(energy[energy != 0].reshape(-1, 1))
         scaler_f0.partial_fit(f0[f0 != 0].reshape(-1, 1))
 
@@ -480,7 +494,7 @@ def preprocess():
         chunksize=10,
     )
     for *_, features in valid_map:
-        save_features_to_file(features, "valid", config)
+        save_features_to_file(features, "valid", speaker_name, config)
 
 
 def gen_normal_mel(mel_path, scaler, config):

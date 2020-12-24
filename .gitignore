@@ -26,6 +26,7 @@ ljspeech
 *.npy
 ./*.wav
 *.yml
+*.zip
 !docker-compose.yml
 /Pipfile
 /Pipfile.lock
@@ -42,4 +43,7 @@ dump_baker/
 dump_ljspeech/
 dump_kss/
 dump_libritts/
+dump/
+dump_debug/
 data/
+TensorFlowTTS.egg-info/

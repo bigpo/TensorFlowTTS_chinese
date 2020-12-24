@@ -186,6 +186,7 @@ PINYIN_DICT = {
     "duo": ("d", "uo"),
     "e": ("^", "e"),
     "ei": ("^", "ei"),
+    "n": ("^", "en"), #TODO 这个是临时加的
     "en": ("^", "en"),
     "ng": ("^", "en"),
     "eng": ("^", "eng"),
@@ -538,7 +539,7 @@ class MyConverter(NeutralToneWith5Mixin, DefaultConverter):
 
 
 @dataclass
-class BakerProcessor(BaseProcessor):
+class ChineseProcessor(BaseProcessor):
 
     pinyin_dict: Dict[str, Tuple[str, str]] = field(default_factory=lambda: PINYIN_DICT)
     cleaner_names: str = None
@@ -556,20 +557,27 @@ class BakerProcessor(BaseProcessor):
         items = []
         if self.data_dir:
             with open(
-                os.path.join(self.data_dir, "ProsodyLabeling/000001-010000.txt"),
+                os.path.join(self.data_dir, "metadata.csv"),
                 encoding="utf-8",
             ) as ttf:
                 lines = ttf.readlines()
-                for idx in range(0, len(lines), 2):
-                    utt_id, chn_char = lines[idx].strip().split()
-                    pinyin = lines[idx + 1].strip().split()
-                    if "IY1" in pinyin or "Ｂ" in chn_char:
-                        print(f"Skip this: {utt_id} {chn_char} {pinyin}")
+                speakers_dict = {}
+                for idx in range(0, len(lines)):
+                    path, chn_char = lines[idx].strip().split("\t")
+                    speaker = path.split("/")[0]
+                    if speaker not in speakers_dict:
+                        speakers_dict[speaker] = 1
+                    else:
+                        speakers_dict[speaker] += 1
+                    
+                    #"IY1" in pinyin or 
+                    if "Ｂ" in chn_char:
                         continue
-                    phonemes = self.get_phoneme_from_char_and_pinyin(chn_char, pinyin)
-                    wav_path = os.path.join(self.data_dir, "Wave", "%s.wav" % utt_id)
+
+                    # phonemes = self.get_phoneme_from_char_and_pinyin(chn_char, pinyin)
+                    wav_path = os.path.join(self.data_dir, path)
                     items.append(
-                        [" ".join(phonemes), wav_path, utt_id, self.speaker_name]
+                        [chn_char, wav_path, speakers_dict[speaker], speaker]
                     )
             self.items = items
 
@@ -581,7 +589,7 @@ class BakerProcessor(BaseProcessor):
         result = ["sil"]
         while i < char_len:
             cur_char = chn_char[i]
-            if is_zh(cur_char): #可以去除中文标点符号。
+            if is_zh(cur_char):
                 if pinyin[j][:-1] not in self.pinyin_dict:
                     assert chn_char[i + 1] == "儿"
                     assert pinyin[j][-2] == "r"
@@ -620,17 +628,20 @@ class BakerProcessor(BaseProcessor):
 
     def get_one_sample(self, item):
         text, wav_file, utt_id, speaker_name = item
- 
-        # normalize audio signal to be [-1, 1], soundfile already norm.
-        audio, rate = sf.read(wav_file)
+        
+        # if speaker_name == "5_2883" and utt_id == 446:
+        #     print("got you")
+
+        audio, rate = librosa.load(wav_file, sr=self.target_rate)
         audio = audio.astype(np.float32)
-        if rate != self.target_rate:
-            assert rate > self.target_rate
-            audio = librosa.resample(audio, rate, self.target_rate)
+
+        peak = np.abs(audio).max()
+        if peak > 1.0:
+            audio /= peak
 
         # convert text to ids
         try:
-            text_ids = np.asarray(self.text_to_sequence(text), np.int32)
+            text_ids = np.asarray(self.text_to_sequence(text, inference=True), np.int32)
         except Exception as e:
             print(e, utt_id, text)
             return None
@@ -662,7 +673,7 @@ class BakerProcessor(BaseProcessor):
                     new_pinyin.append(x)
             phonemes = self.get_phoneme_from_char_and_pinyin(text, new_pinyin)
             text = " ".join(phonemes)
-            print(f"phoneme seq: {text}")
+            # print(f"phoneme seq: {text}")
 
         sequence = []
         for symbol in text.split():
